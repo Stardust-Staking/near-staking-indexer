@@ -16,6 +16,7 @@ use fastnear_primitives::near_primitives::views::{
 };
 use fastnear_primitives::near_primitives::{borsh, views};
 
+use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -151,11 +152,27 @@ impl PendingTransaction {
     }
 }
 
+#[derive(Clone)]
+pub struct WatchListEntry {
+    pub account_id: String,
+    pub is_regex: bool,
+}
+
+impl From<(String, bool)> for WatchListEntry {
+    fn from(value: (String, bool)) -> Self {
+        WatchListEntry {
+            account_id: value.0,
+            is_regex: value.1,
+        }
+    }
+}
+
 pub struct TransactionsData {
     pub commit_every_block: bool,
     pub tx_cache: TxCache,
     pub rows: TxRows,
     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), clickhouse::error::Error>>>,
+    pub watch_list: Vec<WatchListEntry>,
 }
 
 impl TransactionsData {
@@ -176,6 +193,7 @@ impl TransactionsData {
             tx_cache,
             rows: TxRows::default(),
             commit_handlers: vec![],
+            watch_list: vec![],
         }
     }
 
@@ -312,7 +330,9 @@ impl TransactionsData {
                     .extend(pending_receipt_ids.clone());
                 if pending_transaction.pending_receipt_ids.is_empty() {
                     // Received the final receipt.
-                    complete_transactions.push(pending_transaction);
+                    if self.some_account_in_watch_list(&pending_transaction) {
+                        complete_transactions.push(pending_transaction);
+                    }
                 } else {
                     self.tx_cache
                         .insert_transaction(pending_transaction, &pending_receipt_ids);
@@ -348,7 +368,7 @@ impl TransactionsData {
             .clone()
             .to_string();
 
-        for block_height in transaction.blocks {
+        for block_height in transaction.blocks.clone() {
             let block_header = self.tx_cache.get_and_remove_block_header(block_height);
             if let Some(block_header) = block_header {
                 self.rows.block_txs.push(BlockTxRow {
@@ -377,8 +397,6 @@ impl TransactionsData {
             }
         }
 
-        let mut accounts = HashSet::new();
-        accounts.insert(transaction.transaction.transaction.signer_id.clone());
         for receipt in &transaction.transaction.receipts {
             let receipt_id = receipt.receipt.receipt_id.to_string();
             self.rows.receipt_txs.push(ReceiptTxRow {
@@ -388,8 +406,6 @@ impl TransactionsData {
                 tx_block_height: transaction.tx_block_height,
                 tx_block_timestamp: transaction.tx_block_timestamp,
             });
-            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
-            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
         }
         for data_receipt in &transaction.transaction.data_receipts {
             let receipt_id = data_receipt.receipt_id.to_string();
@@ -402,6 +418,7 @@ impl TransactionsData {
             });
         }
 
+        let accounts = Self::get_accounts_from_transaction(&transaction);
         for account_id in accounts {
             self.rows.account_txs.push(AccountTxRow {
                 account_id: account_id.to_string(),
@@ -508,6 +525,44 @@ impl TransactionsData {
             handler.await??;
         }
         Ok(())
+    }
+
+    fn get_accounts_from_transaction(transaction: &PendingTransaction) -> HashSet<AccountId> {
+        let mut accounts = HashSet::new();
+        accounts.insert(transaction.transaction.transaction.signer_id.clone());
+
+        for receipt in &transaction.transaction.receipts {
+            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
+            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
+        }
+
+        accounts
+    }
+
+    fn some_account_in_watch_list(&self, transaction: &PendingTransaction) -> bool {
+        let accounts = Self::get_accounts_from_transaction(transaction);
+
+        self.watch_list
+          .clone()
+          .into_iter()
+          .find(
+              |e|
+                  accounts
+                    .clone()
+                    .into_iter()
+                    .find(|a| if e.is_regex {
+                        let re = Regex::new(e.account_id.as_str()).unwrap();
+                        re.is_match(a.as_str())
+                    } else {
+                        a.to_string() == e.clone().account_id
+                    })
+                    .is_some()
+          )
+          .is_some()
+    }
+
+    pub fn set_watch_list(&mut self, watch_list: Vec<WatchListEntry>) {
+        self.watch_list.extend(watch_list);
     }
 }
 

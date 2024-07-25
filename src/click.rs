@@ -32,6 +32,15 @@ impl ClickDB {
         Ok(block_height)
     }
 
+    pub async fn get_watch_list(&self) -> clickhouse::error::Result<Vec<(String, bool)>> {
+        let result = self
+            .client
+            .query("SELECT account_id, is_regex FROM watch_list")
+          .fetch_all::<(String, bool)>()
+          .await?;
+        Ok(result)
+    }
+
     pub async fn verify_connection(&self) -> clickhouse::error::Result<()> {
         self.client.query("SELECT 1").execute().await?;
         Ok(())

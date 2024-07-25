@@ -159,4 +159,11 @@ CREATE TABLE receipt_txs
 PRIMARY KEY (tx_block_height)
 ORDER BY (tx_block_height, receipt_id)
 
+CREATE TABLE watch_list
+(
+  account_id         String COMMENT 'The receipt account or regular expression',
+  is_regex           Bool COMMENT 'The account_id value is a regular expression'
+) ENGINE = ReplacingMergeTree
+PRIMARY KEY (account_id)
+ORDER BY (account_id)
 ```

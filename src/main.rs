@@ -143,6 +143,16 @@ async fn listen_blocks_for_transactions(
     mut transactions_data: TransactionsData,
     last_block_height: u64,
 ) {
+    transactions_data.set_watch_list(
+        db
+          .get_watch_list()
+          .await
+          .unwrap_or(vec![])
+          .into_iter()
+          .map(|e| e.into())
+          .collect()
+    );
+
     while let Some(block) = stream.recv().await {
         let block_height = block.block.header.height;
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
