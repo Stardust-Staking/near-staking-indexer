@@ -33,7 +33,7 @@ const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 const BLOCK_HEADER_CLEANUP: u64 = 2000;
 const MAX_COMMIT_HANDLERS: usize = 3;
 
-const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
+const POTENTIAL_ACCOUNT_ARGS: [&str; 21] = [
     "receiver_id",
     "account_id",
     "sender_id",
@@ -53,6 +53,8 @@ const POTENTIAL_ACCOUNT_ARGS: [&str; 19] = [
     "beneficiary_id",
     "staking_pool_account_id",
     "owner_account_id",
+    "claimer",
+    "bounty_owner",
 ];
 
 const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
