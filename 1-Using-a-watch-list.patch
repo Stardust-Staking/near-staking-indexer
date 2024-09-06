@@ -1,0 +1,221 @@
+From 5caa3211dfd37b84e2a599fb3c7bb31cdcf71157 Mon Sep 17 00:00:00 2001
+From: Oleh Ivaniuk <fedencer7@gmail.com>
+Date: Thu, 25 Jul 2024 11:03:38 +0300
+Subject: [PATCH] Using a watch list
+
+---
+ Cargo.toml          |  1 +
+ README.md           |  7 +++++
+ src/click.rs        |  9 ++++++
+ src/main.rs         | 10 +++++++
+ src/transactions.rs | 67 +++++++++++++++++++++++++++++++++++++++++----
+ 5 files changed, 88 insertions(+), 6 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index c73d5f0..677b469 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -38,3 +38,4 @@ base64 = "0.21.5"
+ ctrlc = "3.4.4"
+ 
+ sled = "=1.0.0-alpha.121"
++regex = "1.10.5"
+diff --git a/README.md b/README.md
+index 3c3dfd3..1e38722 100644
+--- a/README.md
++++ b/README.md
+@@ -159,4 +159,11 @@ CREATE TABLE receipt_txs
+ PRIMARY KEY (tx_block_height)
+ ORDER BY (tx_block_height, receipt_id)
+ 
++CREATE TABLE watch_list
++(
++  account_id         String COMMENT 'The receipt account or regular expression',
++  is_regex           Bool COMMENT 'The account_id value is a regular expression'
++) ENGINE = ReplacingMergeTree
++PRIMARY KEY (account_id)
++ORDER BY (account_id)
+ ```
+diff --git a/src/click.rs b/src/click.rs
+index 4b918ab..cdc4801 100644
+--- a/src/click.rs
++++ b/src/click.rs
+@@ -32,6 +32,15 @@ impl ClickDB {
+         Ok(block_height)
+     }
+ 
++    pub async fn get_watch_list(&self) -> clickhouse::error::Result<Vec<(String, bool)>> {
++        let result = self
++            .client
++            .query("SELECT account_id, is_regex FROM watch_list")
++          .fetch_all::<(String, bool)>()
++          .await?;
++        Ok(result)
++    }
++
+     pub async fn verify_connection(&self) -> clickhouse::error::Result<()> {
+         self.client.query("SELECT 1").execute().await?;
+         Ok(())
+diff --git a/src/main.rs b/src/main.rs
+index 6bfa3c6..34adf92 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -143,6 +143,16 @@ async fn listen_blocks_for_transactions(
+     mut transactions_data: TransactionsData,
+     last_block_height: u64,
+ ) {
++    transactions_data.set_watch_list(
++        db
++          .get_watch_list()
++          .await
++          .unwrap_or(vec![])
++          .into_iter()
++          .map(|e| e.into())
++          .collect()
++    );
++
+     while let Some(block) = stream.recv().await {
+         let block_height = block.block.header.height;
+         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
+diff --git a/src/transactions.rs b/src/transactions.rs
+index 3cd7c87..4a5ec3f 100644
+--- a/src/transactions.rs
++++ b/src/transactions.rs
+@@ -16,6 +16,7 @@ use fastnear_primitives::near_primitives::views::{
+ };
+ use fastnear_primitives::near_primitives::{borsh, views};
+ 
++use regex::Regex;
+ use serde::de::DeserializeOwned;
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+@@ -151,11 +152,27 @@ impl PendingTransaction {
+     }
+ }
+ 
++#[derive(Clone)]
++pub struct WatchListEntry {
++    pub account_id: String,
++    pub is_regex: bool,
++}
++
++impl From<(String, bool)> for WatchListEntry {
++    fn from(value: (String, bool)) -> Self {
++        WatchListEntry {
++            account_id: value.0,
++            is_regex: value.1,
++        }
++    }
++}
++
+ pub struct TransactionsData {
+     pub commit_every_block: bool,
+     pub tx_cache: TxCache,
+     pub rows: TxRows,
+     pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), clickhouse::error::Error>>>,
++    pub watch_list: Vec<WatchListEntry>,
+ }
+ 
+ impl TransactionsData {
+@@ -176,6 +193,7 @@ impl TransactionsData {
+             tx_cache,
+             rows: TxRows::default(),
+             commit_handlers: vec![],
++            watch_list: vec![],
+         }
+     }
+ 
+@@ -312,7 +330,9 @@ impl TransactionsData {
+                     .extend(pending_receipt_ids.clone());
+                 if pending_transaction.pending_receipt_ids.is_empty() {
+                     // Received the final receipt.
+-                    complete_transactions.push(pending_transaction);
++                    if self.some_account_in_watch_list(&pending_transaction) {
++                        complete_transactions.push(pending_transaction);
++                    }
+                 } else {
+                     self.tx_cache
+                         .insert_transaction(pending_transaction, &pending_receipt_ids);
+@@ -348,7 +368,7 @@ impl TransactionsData {
+             .clone()
+             .to_string();
+ 
+-        for block_height in transaction.blocks {
++        for block_height in transaction.blocks.clone() {
+             let block_header = self.tx_cache.get_and_remove_block_header(block_height);
+             if let Some(block_header) = block_header {
+                 self.rows.block_txs.push(BlockTxRow {
+@@ -377,8 +397,6 @@ impl TransactionsData {
+             }
+         }
+ 
+-        let mut accounts = HashSet::new();
+-        accounts.insert(transaction.transaction.transaction.signer_id.clone());
+         for receipt in &transaction.transaction.receipts {
+             let receipt_id = receipt.receipt.receipt_id.to_string();
+             self.rows.receipt_txs.push(ReceiptTxRow {
+@@ -388,8 +406,6 @@ impl TransactionsData {
+                 tx_block_height: transaction.tx_block_height,
+                 tx_block_timestamp: transaction.tx_block_timestamp,
+             });
+-            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
+-            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
+         }
+         for data_receipt in &transaction.transaction.data_receipts {
+             let receipt_id = data_receipt.receipt_id.to_string();
+@@ -402,6 +418,7 @@ impl TransactionsData {
+             });
+         }
+ 
++        let accounts = Self::get_accounts_from_transaction(&transaction);
+         for account_id in accounts {
+             self.rows.account_txs.push(AccountTxRow {
+                 account_id: account_id.to_string(),
+@@ -509,6 +526,44 @@ impl TransactionsData {
+         }
+         Ok(())
+     }
++
++    fn get_accounts_from_transaction(transaction: &PendingTransaction) -> HashSet<AccountId> {
++        let mut accounts = HashSet::new();
++        accounts.insert(transaction.transaction.transaction.signer_id.clone());
++
++        for receipt in &transaction.transaction.receipts {
++            add_accounts_from_receipt(&mut accounts, &receipt.receipt);
++            add_accounts_from_logs(&mut accounts, &receipt.execution_outcome.outcome.logs);
++        }
++
++        accounts
++    }
++
++    fn some_account_in_watch_list(&self, transaction: &PendingTransaction) -> bool {
++        let accounts = Self::get_accounts_from_transaction(transaction);
++
++        self.watch_list
++          .clone()
++          .into_iter()
++          .find(
++              |e|
++                  accounts
++                    .clone()
++                    .into_iter()
++                    .find(|a| if e.is_regex {
++                        let re = Regex::new(e.account_id.as_str()).unwrap();
++                        re.is_match(a.as_str())
++                    } else {
++                        a.to_string() == e.clone().account_id
++                    })
++                    .is_some()
++          )
++          .is_some()
++    }
++
++    pub fn set_watch_list(&mut self, watch_list: Vec<WatchListEntry>) {
++        self.watch_list.extend(watch_list);
++    }
+ }
+ 
+ fn extract_accounts(accounts: &mut HashSet<AccountId>, value: &Value, keys: &[&str]) {
+-- 
+2.34.1
+
