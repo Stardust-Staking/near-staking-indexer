@@ -25,6 +25,7 @@ function initClickHouse() {
     username: CLICK_HOUSE_USER,
     password: CLICK_HOUSE_PASSWORD,
     database: CLICK_HOUSE_DB,
+    request_timeout: 240_000,
   });
 }
 
