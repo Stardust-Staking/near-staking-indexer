@@ -1,3 +1,5 @@
+// This script adds all accounts from Heroes transactions to the account_txs table
+
 require('dotenv').config();
 const { createClient } = require('@clickhouse/client');
 const axios = require('axios');

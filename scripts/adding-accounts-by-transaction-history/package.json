@@ -5,12 +5,14 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "adding_all": "node src/adding_all.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "@clickhouse/client": "^1.5.0",
     "axios": "^1.7.7",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "decimal.js": "^10.4.3"
   },
   "author": "",
   "license": "ISC"
