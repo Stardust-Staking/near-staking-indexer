@@ -264,15 +264,22 @@ async function buildAccountsTable(client, blockHeightFrom, blockHeightTo) {
 }
 
 async function main() {
-  try {
-    const client = initClickHouse();
-    await createTempAccountsTable(client);
-    await buildAccountsTable(client, BLOCK_HEIGHT_FROM, BLOCK_HEIGHT_TO);
-    await appendRecordsToMainAccountsTable(client);
-    await removeTempAccountsTable(client);
+  let keepRunning = true
 
-  } catch (err) {
-    console.error(err);
+  while (keepRunning) {
+    try {
+      const client = initClickHouse();
+      await createTempAccountsTable(client);
+      await buildAccountsTable(client, BLOCK_HEIGHT_FROM, BLOCK_HEIGHT_TO);
+      await appendRecordsToMainAccountsTable(client);
+      await removeTempAccountsTable(client);
+
+      keepRunning = false;
+
+    } catch (err) {
+      console.error(err);
+      console.log(`Restarting the process after an error...`);
+    }
   }
 }
 
