@@ -207,7 +207,6 @@ async function buildAccountsTable(client, blockHeightFrom, blockHeightTo) {
   let doNotIncludeAccounts = [HEROES_BOUNTIES_CONTRACT_ID, ...(await getTokens())];
   const limit = 500;
   let offset = 0;
-  let i = 1;
 
   let dataset = await getTransactions(client, lastBlockHeight, blockHeightTo, limit, offset);
   let lastBlockTimestamp = await getTimestampOfLatestData(client);
@@ -248,17 +247,13 @@ async function buildAccountsTable(client, blockHeightFrom, blockHeightTo) {
             format: 'JSONEachRow',
           });
         }
-
-        // console.log(`Record ${i} of ${dataset.length}`);
       }
-
-      i++;
     }
 
     offset += dataset.length;
     lastBlockTimestamp = new Decimal(dataset[dataset.length - 1].block_timestamp);
-    lastBlockHeight = dataset[dataset.length - 1].block_height;
-    console.log(`lastBlockHeight: ${lastBlockHeight}`);
+    const latestBlockHeight = dataset[dataset.length - 1].block_height;
+    console.log(`lastBlockHeight: ${latestBlockHeight}`);
 
     dataset = await getTransactions(client, lastBlockHeight, blockHeightTo, limit, offset);
   }
