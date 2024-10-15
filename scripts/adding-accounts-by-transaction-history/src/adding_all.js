@@ -73,7 +73,14 @@ function parseTransaction(resultRow) {
           if (methodName) {
             accounts.push(r.receipt.predecessor_id);
             accounts.push(r.receipt.receiver_id);
-            const argsObj = JSON.parse(args);
+            let argsObj;
+            try {
+              argsObj = JSON.parse(args);
+            } catch (err) {
+              console.error(`Arguments parsing error: ${args}`);
+              console.error(err);
+              argsObj = {};
+            }
 
             for (const key in argsObj) {
               if (!argsObj.hasOwnProperty(key)) {
