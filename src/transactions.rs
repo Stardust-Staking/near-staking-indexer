@@ -183,10 +183,12 @@ impl TransactionsData {
             .map(|v| v == "true")
             .unwrap_or(false);
         let sled_db_path = env::var("SLED_DB_PATH").expect("Missing SLED_DB_PATH env var");
-        if !std::path::Path::new(&sled_db_path).exists() {
-            std::fs::create_dir_all(&sled_db_path)
-                .expect(format!("Failed to create {}", sled_db_path).as_str());
+        if std::path::Path::new(&sled_db_path).exists() {
+            std::fs::remove_dir_all(&sled_db_path)
+              .expect(format!("Failed to remove {}", sled_db_path).as_str());
         }
+        std::fs::create_dir_all(&sled_db_path)
+          .expect(format!("Failed to create {}", sled_db_path).as_str());
         let sled_db = sled::open(&sled_db_path).expect("Failed to open sled_db_path");
         let tx_cache = TxCache::new(sled_db);
 
