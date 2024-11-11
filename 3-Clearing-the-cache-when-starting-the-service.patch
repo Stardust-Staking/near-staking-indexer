@@ -1,0 +1,32 @@
+From d3c36326daca827d80092718399241060fa0aeb5 Mon Sep 17 00:00:00 2001
+From: Oleh Ivaniuk <fedencer7@gmail.com>
+Date: Mon, 28 Oct 2024 20:45:54 +0200
+Subject: [PATCH] Clearing the cache when starting the service
+
+---
+ src/transactions.rs | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/transactions.rs b/src/transactions.rs
+index 6673403..52679c8 100644
+--- a/src/transactions.rs
++++ b/src/transactions.rs
+@@ -183,10 +183,12 @@ impl TransactionsData {
+             .map(|v| v == "true")
+             .unwrap_or(false);
+         let sled_db_path = env::var("SLED_DB_PATH").expect("Missing SLED_DB_PATH env var");
+-        if !std::path::Path::new(&sled_db_path).exists() {
+-            std::fs::create_dir_all(&sled_db_path)
+-                .expect(format!("Failed to create {}", sled_db_path).as_str());
++        if std::path::Path::new(&sled_db_path).exists() {
++            std::fs::remove_dir_all(&sled_db_path)
++              .expect(format!("Failed to remove {}", sled_db_path).as_str());
+         }
++        std::fs::create_dir_all(&sled_db_path)
++          .expect(format!("Failed to create {}", sled_db_path).as_str());
+         let sled_db = sled::open(&sled_db_path).expect("Failed to open sled_db_path");
+         let tx_cache = TxCache::new(sled_db);
+ 
+-- 
+2.34.1
+
