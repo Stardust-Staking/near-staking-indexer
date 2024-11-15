@@ -1,11 +1,11 @@
 mod actions;
-mod click;
-mod common;
+mod model;
+pub mod common;
 
 mod transactions;
 
 use crate::actions::ActionsData;
-use crate::click::*;
+use crate::model::*;
 use crate::transactions::TransactionsData;
 use std::sync::Arc;
 
@@ -34,14 +34,11 @@ async fn main() {
     })
     .expect("Error setting Ctrl+C handler");
 
-    common::setup_tracing("clickhouse=info,provider=info,neardata-fetcher=info");
+    common::setup_tracing("postgres=info,provider=info,neardata-fetcher=info");
 
-    tracing::log::info!(target: PROJECT_ID, "Starting Clickhouse Provider");
+    tracing::log::info!(target: PROJECT_ID, "Starting Postgres Provider");
 
-    let mut db = ClickDB::new(10000);
-    db.verify_connection()
-        .await
-        .expect("Failed to connect to Clickhouse");
+    let db = PostgresDB::new(10000).await;
 
     let client = reqwest::Client::new();
     let chain_id = ChainId::try_from(std::env::var("CHAIN_ID").expect("CHAIN_ID is not set"))
@@ -69,7 +66,7 @@ async fn main() {
     match command {
         "actions" => {
             let mut actions_data = ActionsData::new();
-            actions_data.fetch_last_block_heights(&mut db).await;
+            actions_data.fetch_last_block_heights(&db).await;
             let min_block_height = actions_data.min_restart_block();
             tracing::log::info!(target: PROJECT_ID, "Min block height: {}", min_block_height);
 
@@ -90,7 +87,7 @@ async fn main() {
         }
         "transactions" => {
             let mut transactions_data = TransactionsData::new();
-            let last_block_height = transactions_data.last_block_height(&mut db).await;
+            let last_block_height = transactions_data.last_block_height(&db).await;
             let is_cache_ready = transactions_data.is_cache_ready(last_block_height);
             tracing::log::info!(target: PROJECT_ID, "Last block height: {}. Cache is ready: {}", last_block_height, is_cache_ready);
 
@@ -126,20 +123,20 @@ async fn main() {
 
 async fn listen_blocks_for_actions(
     mut stream: mpsc::Receiver<BlockWithTxHashes>,
-    mut db: ClickDB,
+    db: PostgresDB,
     mut actions_data: ActionsData,
 ) {
     while let Some(block) = stream.recv().await {
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block.block.header.height);
-        actions_data.process_block(&mut db, block).await.unwrap();
+        actions_data.process_block(&db, block).await.unwrap();
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
-    actions_data.commit(&mut db).await.unwrap();
+    actions_data.commit(&db).await.unwrap();
 }
 
 async fn listen_blocks_for_transactions(
     mut stream: mpsc::Receiver<BlockWithTxHashes>,
-    db: ClickDB,
+    db: PostgresDB,
     mut transactions_data: TransactionsData,
     last_block_height: u64,
 ) {

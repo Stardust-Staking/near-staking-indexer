@@ -3,8 +3,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::str::FromStr;
-
-use clickhouse::Row;
 use fastnear_primitives::near_indexer_primitives::{
     IndexerExecutionOutcomeWithReceipt, IndexerTransactionWithOutcome,
 };
@@ -20,6 +18,7 @@ use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::common::Row;
 
 const LAST_BLOCK_HEIGHT_KEY: &str = "last_block_height";
 
@@ -31,7 +30,6 @@ const TRANSACTIONS_KEY: &str = "transactions";
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 
 const BLOCK_HEADER_CLEANUP: u64 = 2000;
-const MAX_COMMIT_HANDLERS: usize = 3;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 21] = [
     "receiver_id",
@@ -71,6 +69,7 @@ const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
 ];
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct EventJson {
     pub version: String,
     pub standard: String,
@@ -78,18 +77,24 @@ pub struct EventJson {
     pub data: Vec<Value>,
 }
 
-#[derive(Row, Serialize)]
+#[derive(Serialize, Clone)]
 pub struct TransactionRow {
     pub transaction_hash: String,
     pub signer_id: String,
     pub tx_block_height: u64,
     pub tx_block_hash: String,
     pub tx_block_timestamp: u64,
-    pub transaction: String,
+    pub transaction: Value,
     pub last_block_height: u64,
 }
 
-#[derive(Row, Serialize)]
+impl From<TransactionRow> for Row {
+    fn from(value: TransactionRow) -> Self {
+        Row::TransactionRow(value)
+    }
+}
+
+#[derive(Serialize, Clone)]
 pub struct AccountTxRow {
     pub account_id: String,
     pub transaction_hash: String,
@@ -98,7 +103,13 @@ pub struct AccountTxRow {
     pub tx_block_timestamp: u64,
 }
 
-#[derive(Row, Serialize, Deserialize, Clone, Debug)]
+impl From<AccountTxRow> for Row {
+    fn from(value: AccountTxRow) -> Self {
+        Row::AccountTxRow(value)
+    }
+}
+
+#[derive(Serialize, Clone)]
 pub struct BlockTxRow {
     pub block_height: u64,
     pub block_hash: String,
@@ -108,13 +119,25 @@ pub struct BlockTxRow {
     pub tx_block_height: u64,
 }
 
-#[derive(Row, Serialize)]
+impl From<BlockTxRow> for Row {
+    fn from(value: BlockTxRow) -> Self {
+        Row::BlockTxRow(value)
+    }
+}
+
+#[derive(Serialize, Clone)]
 pub struct ReceiptTxRow {
     pub receipt_id: String,
     pub transaction_hash: String,
     pub signer_id: String,
     pub tx_block_height: u64,
     pub tx_block_timestamp: u64,
+}
+
+impl From<ReceiptTxRow> for Row {
+    fn from(value: ReceiptTxRow) -> Self {
+        Row::ReceiptTxRow(value)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -173,7 +196,6 @@ pub struct TransactionsData {
     pub commit_every_block: bool,
     pub tx_cache: TxCache,
     pub rows: TxRows,
-    pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), clickhouse::error::Error>>>,
     pub watch_list: Vec<WatchListEntry>,
 }
 
@@ -196,14 +218,13 @@ impl TransactionsData {
             commit_every_block,
             tx_cache,
             rows: TxRows::default(),
-            commit_handlers: vec![],
             watch_list: vec![],
         }
     }
 
     pub async fn process_block(
         &mut self,
-        db: &ClickDB,
+        db: &PostgresDB,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
     ) -> anyhow::Result<()> {
@@ -439,7 +460,7 @@ impl TransactionsData {
             tx_block_height: transaction.tx_block_height,
             tx_block_hash: transaction.tx_block_hash.to_string(),
             tx_block_timestamp: transaction.tx_block_timestamp,
-            transaction: serde_json::to_string(&transaction.transaction).unwrap(),
+            transaction: serde_json::to_value(&transaction.transaction).unwrap(),
             last_block_height,
         });
 
@@ -450,13 +471,13 @@ impl TransactionsData {
 
     pub async fn maybe_commit(
         &mut self,
-        db: &ClickDB,
+        db: &PostgresDB,
         block_height: BlockHeight,
     ) -> anyhow::Result<()> {
         let is_round_block = block_height % SAVE_STEP == 0;
         if is_round_block {
             tracing::log::info!(
-                target: CLICKHOUSE_TARGET,
+                target: POSTGRES_TARGET,
                 "#{}: Having {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
                 block_height,
                 self.rows.transactions.len(),
@@ -473,46 +494,51 @@ impl TransactionsData {
         Ok(())
     }
 
-    pub async fn commit(&mut self, db: &ClickDB) -> anyhow::Result<()> {
+    pub async fn commit(&mut self, db: &PostgresDB) -> anyhow::Result<()> {
         let mut rows = TxRows::default();
         std::mem::swap(&mut rows, &mut self.rows);
-        while self.commit_handlers.len() >= MAX_COMMIT_HANDLERS {
-            self.commit_handlers.remove(0).await??;
+
+        if !rows.transactions.is_empty() {
+            db.insert_rows_with_retry(
+                &rows.transactions.clone().into_iter().map(|r| r.into()).collect(),
+                "transactions"
+            ).await?;
         }
-        let db = db.clone();
-        let handler = tokio::spawn(async move {
-            if !rows.transactions.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.transactions, "transactions").await?;
-            }
-            if !rows.account_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.account_txs, "account_txs").await?;
-            }
-            if !rows.block_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.block_txs, "block_txs").await?;
-            }
-            if !rows.receipt_txs.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.receipt_txs, "receipt_txs").await?;
-            }
-            tracing::log::info!(
-                target: CLICKHOUSE_TARGET,
+        if !rows.account_txs.is_empty() {
+            db.insert_rows_with_retry(
+                &rows.account_txs.clone().into_iter().map(|r| r.into()).collect(),
+                "account_txs"
+            ).await?;
+        }
+        if !rows.block_txs.is_empty() {
+            db.insert_rows_with_retry(
+                &rows.block_txs.clone().into_iter().map(|r| r.into()).collect(),
+                "block_txs"
+            ).await?;
+        }
+        if !rows.receipt_txs.is_empty() {
+            db.insert_rows_with_retry(
+                &rows.receipt_txs.clone().into_iter().map(|r| r.into()).collect(),
+                "receipt_txs"
+            ).await?;
+        }
+        tracing::log::info!(
+                target: POSTGRES_TARGET,
                 "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
                 rows.transactions.len(),
                 rows.account_txs.len(),
                 rows.block_txs.len(),
                 rows.receipt_txs.len(),
             );
-            rows.transactions.clear();
-            rows.account_txs.clear();
-            rows.block_txs.clear();
-            rows.receipt_txs.clear();
-            Ok::<(), clickhouse::error::Error>(())
-        });
-        self.commit_handlers.push(handler);
+        rows.transactions.clear();
+        rows.account_txs.clear();
+        rows.block_txs.clear();
+        rows.receipt_txs.clear();
 
         Ok(())
     }
 
-    pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
+    pub async fn last_block_height(&mut self, db: &PostgresDB) -> BlockHeight {
         let db_block = db.max("block_height", "block_txs").await.unwrap_or(0);
         let cache_block = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
         db_block.max(cache_block)
@@ -525,9 +551,6 @@ impl TransactionsData {
 
     pub async fn flush(&mut self) -> anyhow::Result<()> {
         self.tx_cache.flush();
-        while let Some(handler) = self.commit_handlers.pop() {
-            handler.await??;
-        }
         Ok(())
     }
 

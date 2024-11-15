@@ -1,8 +1,8 @@
 use crate::*;
+use tokio_postgres::Error;
 use base64::Engine;
 
 use base64::prelude::BASE64_STANDARD;
-use clickhouse::Row;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 
 use fastnear_primitives::near_primitives::types::BlockHeight;
@@ -12,6 +12,7 @@ use fastnear_primitives::near_primitives::views::{
 };
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
+use crate::common::Row;
 
 const MAX_TOKEN_LENGTH: usize = 64;
 const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
@@ -38,7 +39,7 @@ pub enum ActionKind {
     NonrefundableStorageTransfer = 10,
 }
 
-#[derive(Row, Serialize)]
+#[derive(Serialize, Clone)]
 pub struct FullActionRow {
     pub block_height: u64,
     pub block_hash: String,
@@ -72,7 +73,13 @@ pub struct FullActionRow {
     pub args: Option<String>,
 }
 
-#[derive(Row, Serialize)]
+impl From<FullActionRow> for Row {
+    fn from(value: FullActionRow) -> Self {
+        Row::FullActionRow(value)
+    }
+}
+
+#[derive(Serialize, Clone)]
 pub struct FullEventRow {
     pub block_height: u64,
     pub block_hash: String,
@@ -93,7 +100,13 @@ pub struct FullEventRow {
     pub event: Option<String>,
 }
 
-#[derive(Row, Serialize)]
+impl From<FullEventRow> for Row {
+    fn from(value: FullEventRow) -> Self {
+        Row::FullEventRow(value)
+    }
+}
+
+#[derive(Serialize, Clone)]
 pub struct FullDataRow {
     pub block_height: u64,
     pub block_hash: String,
@@ -104,6 +117,12 @@ pub struct FullDataRow {
     pub account_id: String,
     pub data_id: String,
     pub data: Option<String>,
+}
+
+impl From<FullDataRow> for Row {
+    fn from(value: FullDataRow) -> Self {
+        Row::FullDataRow(value)
+    }
 }
 
 #[derive(Default)]
@@ -144,11 +163,11 @@ impl ActionsData {
         min_guaranteed_block.max(min_optimistic_block)
     }
 
-    pub async fn fetch_last_block_heights(&mut self, click_db: &mut ClickDB) {
-        self.last_action_block_height = click_db.max("block_height", "actions").await.unwrap_or(0);
-        self.last_event_block_height = click_db.max("block_height", "events").await.unwrap_or(0);
-        self.last_data_block_height = click_db.max("block_height", "data").await.unwrap_or(0);
-        tracing::log::info!(target: CLICKHOUSE_TARGET, "Last block heights: actions={}, events={}, data={}", self.last_action_block_height, self.last_event_block_height, self.last_data_block_height);
+    pub async fn fetch_last_block_heights(&mut self, db: &PostgresDB) {
+        self.last_action_block_height = db.max("block_height", "actions").await.unwrap_or(0);
+        self.last_event_block_height = db.max("block_height", "events").await.unwrap_or(0);
+        self.last_data_block_height = db.max("block_height", "data").await.unwrap_or(0);
+        tracing::log::info!(target: POSTGRES_TARGET, "Last block heights: actions={}, events={}, data={}", self.last_action_block_height, self.last_event_block_height, self.last_data_block_height);
     }
 
     pub fn merge(&mut self, rows: Rows, block_height: BlockHeight) {
@@ -166,35 +185,44 @@ impl ActionsData {
         }
     }
 
-    pub async fn commit(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
-        self.commit_actions(click_db).await?;
-        self.commit_events(click_db).await?;
-        self.commit_data(click_db).await?;
+    pub async fn commit(&mut self, db: &PostgresDB) -> Result<(), Error> {
+        self.commit_actions(db).await?;
+        self.commit_events(db).await?;
+        self.commit_data(db).await?;
         Ok(())
     }
 
     pub async fn commit_actions(
         &mut self,
-        click_db: &mut ClickDB,
-    ) -> clickhouse::error::Result<()> {
+        db: &PostgresDB,
+    ) -> Result<(), Error> {
         if !self.rows.actions.is_empty() {
-            insert_rows_with_retry(&click_db.client, &self.rows.actions, "actions").await?;
+            db.insert_rows_with_retry(
+                &self.rows.actions.clone().into_iter().map(|r| r.into()).collect(),
+                "actions"
+            ).await?;
             self.rows.actions.clear();
         }
         Ok(())
     }
 
-    pub async fn commit_events(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
+    pub async fn commit_events(&mut self, db: &PostgresDB) -> Result<(), Error> {
         if !self.rows.events.is_empty() {
-            insert_rows_with_retry(&click_db.client, &self.rows.events, "events").await?;
+            db.insert_rows_with_retry(
+                &self.rows.events.clone().into_iter().map(|r| r.into()).collect(),
+                "events"
+            ).await?;
             self.rows.events.clear();
         }
         Ok(())
     }
 
-    pub async fn commit_data(&mut self, click_db: &mut ClickDB) -> clickhouse::error::Result<()> {
+    pub async fn commit_data(&mut self, db: &PostgresDB) -> Result<(), Error> {
         if !self.rows.data.is_empty() {
-            insert_rows_with_retry(&click_db.client, &self.rows.data, "data").await?;
+            db.insert_rows_with_retry(
+                &self.rows.data.clone().into_iter().map(|r| r.into()).collect(),
+                "data"
+            ).await?;
             self.rows.data.clear();
         }
         Ok(())
@@ -202,7 +230,7 @@ impl ActionsData {
 
     pub async fn process_block(
         &mut self,
-        db: &mut ClickDB,
+        db: &PostgresDB,
         block: BlockWithTxHashes,
     ) -> anyhow::Result<()> {
         let block_height = block.block.header.height;
@@ -211,7 +239,7 @@ impl ActionsData {
 
         let is_round_block = block_height % SAVE_STEP == 0;
         if is_round_block {
-            tracing::log::info!(target: CLICKHOUSE_TARGET, "#{}: Having {} actions, {} events, {} data", block_height, self.rows.actions.len(), self.rows.events.len(), self.rows.data.len());
+            tracing::log::info!(target: POSTGRES_TARGET, "#{}: Having {} actions, {} events, {} data", block_height, self.rows.actions.len(), self.rows.events.len(), self.rows.data.len());
         }
         if self.rows.actions.len() >= db.min_batch || is_round_block {
             self.commit_actions(db).await?;
