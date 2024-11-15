@@ -1,4 +1,5 @@
 use crate::*;
+use tokio_postgres::Error;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::io::Write;
@@ -30,6 +31,7 @@ const TRANSACTIONS_KEY: &str = "transactions";
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
 
 const BLOCK_HEADER_CLEANUP: u64 = 2000;
+const MAX_COMMIT_HANDLERS: usize = 3;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 21] = [
     "receiver_id",
@@ -196,6 +198,7 @@ pub struct TransactionsData {
     pub commit_every_block: bool,
     pub tx_cache: TxCache,
     pub rows: TxRows,
+    pub commit_handlers: Vec<tokio::task::JoinHandle<Result<(), Error>>>,
     pub watch_list: Vec<WatchListEntry>,
 }
 
@@ -218,13 +221,14 @@ impl TransactionsData {
             commit_every_block,
             tx_cache,
             rows: TxRows::default(),
+            commit_handlers: vec![],
             watch_list: vec![],
         }
     }
 
     pub async fn process_block(
         &mut self,
-        db: &PostgresDB,
+        db: Arc<Mutex<PostgresDB>>,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
     ) -> anyhow::Result<()> {
@@ -471,7 +475,7 @@ impl TransactionsData {
 
     pub async fn maybe_commit(
         &mut self,
-        db: &PostgresDB,
+        db: Arc<Mutex<PostgresDB>>,
         block_height: BlockHeight,
     ) -> anyhow::Result<()> {
         let is_round_block = block_height % SAVE_STEP == 0;
@@ -486,7 +490,8 @@ impl TransactionsData {
                 self.rows.receipt_txs.len(),
             );
         }
-        if self.rows.transactions.len() >= db.min_batch || is_round_block || self.commit_every_block
+        let db_clone = Arc::clone(&db);
+        if self.rows.transactions.len() >= db_clone.lock().await.min_batch || is_round_block || self.commit_every_block
         {
             self.commit(db).await?;
         }
@@ -494,35 +499,41 @@ impl TransactionsData {
         Ok(())
     }
 
-    pub async fn commit(&mut self, db: &PostgresDB) -> anyhow::Result<()> {
+    pub async fn commit(&mut self, db: Arc<Mutex<PostgresDB>>) -> anyhow::Result<()> {
         let mut rows = TxRows::default();
         std::mem::swap(&mut rows, &mut self.rows);
 
-        if !rows.transactions.is_empty() {
-            db.insert_rows_with_retry(
-                &rows.transactions.clone().into_iter().map(|r| r.into()).collect(),
-                "transactions"
-            ).await?;
+        while self.commit_handlers.len() >= MAX_COMMIT_HANDLERS {
+            self.commit_handlers.remove(0).await??;
         }
-        if !rows.account_txs.is_empty() {
-            db.insert_rows_with_retry(
-                &rows.account_txs.clone().into_iter().map(|r| r.into()).collect(),
-                "account_txs"
-            ).await?;
-        }
-        if !rows.block_txs.is_empty() {
-            db.insert_rows_with_retry(
-                &rows.block_txs.clone().into_iter().map(|r| r.into()).collect(),
-                "block_txs"
-            ).await?;
-        }
-        if !rows.receipt_txs.is_empty() {
-            db.insert_rows_with_retry(
-                &rows.receipt_txs.clone().into_iter().map(|r| r.into()).collect(),
-                "receipt_txs"
-            ).await?;
-        }
-        tracing::log::info!(
+
+        let handler = tokio::spawn(async move {
+            let db = db.lock().await;
+            if !rows.transactions.is_empty() {
+                db.insert_rows_with_retry(
+                    &rows.transactions.clone().into_iter().map(|r| r.into()).collect(),
+                    "transactions"
+                ).await?;
+            }
+            if !rows.account_txs.is_empty() {
+                db.insert_rows_with_retry(
+                    &rows.account_txs.clone().into_iter().map(|r| r.into()).collect(),
+                    "account_txs"
+                ).await?;
+            }
+            if !rows.block_txs.is_empty() {
+                db.insert_rows_with_retry(
+                    &rows.block_txs.clone().into_iter().map(|r| r.into()).collect(),
+                    "block_txs"
+                ).await?;
+            }
+            if !rows.receipt_txs.is_empty() {
+                db.insert_rows_with_retry(
+                    &rows.receipt_txs.clone().into_iter().map(|r| r.into()).collect(),
+                    "receipt_txs"
+                ).await?;
+            }
+            tracing::log::info!(
                 target: POSTGRES_TARGET,
                 "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
                 rows.transactions.len(),
@@ -530,10 +541,14 @@ impl TransactionsData {
                 rows.block_txs.len(),
                 rows.receipt_txs.len(),
             );
-        rows.transactions.clear();
-        rows.account_txs.clear();
-        rows.block_txs.clear();
-        rows.receipt_txs.clear();
+            rows.transactions.clear();
+            rows.account_txs.clear();
+            rows.block_txs.clear();
+            rows.receipt_txs.clear();
+
+            Ok::<(), Error>(())
+        });
+        self.commit_handlers.push(handler);
 
         Ok(())
     }
@@ -551,6 +566,9 @@ impl TransactionsData {
 
     pub async fn flush(&mut self) -> anyhow::Result<()> {
         self.tx_cache.flush();
+        while let Some(handler) = self.commit_handlers.pop() {
+            handler.await??;
+        }
         Ok(())
     }
 

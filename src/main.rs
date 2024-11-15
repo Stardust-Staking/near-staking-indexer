@@ -14,7 +14,7 @@ use fastnear_neardata_fetcher::fetcher;
 use fastnear_primitives::block_with_tx_hash::*;
 use fastnear_primitives::types::ChainId;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 const PROJECT_ID: &str = "provider";
 
@@ -150,15 +150,18 @@ async fn listen_blocks_for_transactions(
           .collect()
     );
 
+    let db = Arc::new(Mutex::new(db));
+
     while let Some(block) = stream.recv().await {
+        let db = Arc::clone(&db);
         let block_height = block.block.header.height;
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
         transactions_data
-            .process_block(&db, block, last_block_height)
+            .process_block(db, block, last_block_height)
             .await
             .unwrap();
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
-    transactions_data.commit(&db).await.unwrap();
+    transactions_data.commit(db).await.unwrap();
     transactions_data.flush().await.unwrap();
 }
