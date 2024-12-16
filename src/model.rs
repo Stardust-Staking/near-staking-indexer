@@ -124,7 +124,7 @@ impl PostgresDB {
 
   async fn insert_block(&self, row: &BlockRow) -> Result<(), Error> {
     self.client.execute(
-      "insert into block (\
+      "insert into blocks (\
       block_height, block_hash, block_timestamp, prev_block_height, epoch_id, chunks_included, \
       prev_block_hash, author_id, signature, protocol_version\
     ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
