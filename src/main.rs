@@ -130,16 +130,19 @@ async fn listen_blocks_for_actions(
     mut actions_data: ActionsData,
     last_block_height: u64,
 ) {
+    let db = Arc::new(Mutex::new(db));
+
     while let Some(block) = stream.recv().await {
+        let db = Arc::clone(&db);
         let block_height = block.block.header.height;
         tracing::log::info!(target: PROJECT_ID, "Processing block: {}", block_height);
         actions_data
-            .process_block(&db, block, last_block_height)
+            .process_block(db, block, last_block_height)
             .await
             .unwrap();
     }
     tracing::log::info!(target: PROJECT_ID, "Committing the last batch");
-    actions_data.commit(&db).await.unwrap();
+    actions_data.commit(db).await.unwrap();
     actions_data.flush().await.unwrap();
 }
 

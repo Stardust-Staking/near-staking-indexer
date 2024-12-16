@@ -3,13 +3,9 @@
 ### Example .env
 
 ```
-## TODO: change to postgresql
-DATABASE_URL=http://localhost:8123
-DATABASE_USER=default
-DATABASE_PASSWORD=password
-DATABASE_DATABASE=default
+DATABASE_URL=postgresql://username:password@localhost:5432/indexer_db
 NUM_FETCHING_THREADS=8
-CLICKHOUSE_SKIP_COMMIT=false
+POSTGRES_SKIP_COMMIT=false
 COMMIT_EVERY_BLOCK=false
 CHAIN_ID=testnet
 ```
@@ -33,7 +29,7 @@ The explorer is transaction focused. Everything is bundled around transactions.
 -- This is a PostgresSQL table.
 create table if not exists transactions
 (
-  transaction_hash   text not null primary key ,
+  transaction_hash   text not null primary key,
   signer_id          text not null,
   tx_block_height    bigint not null,
   tx_block_hash      text not null,
@@ -89,27 +85,24 @@ create index receipt_txs_block_timestamp_idx on receipt_txs (tx_block_timestamp)
 create index receipt_txs_transaction_hash_idx on receipt_txs (transaction_hash);
 
 --TODO: change to postgresql
-CREATE TABLE blocks
+create table if not exists blocks
 (
-    block_height     UInt64 COMMENT 'The block height',
-    block_hash       String COMMENT 'The block hash',
-    block_timestamp  DateTime64(9, 'UTC') COMMENT 'The block timestamp in UTC',
-    prev_block_height Nullable(UInt64) COMMENT 'The previous block height',
-    epoch_id         String COMMENT 'The epoch ID',
-    chunks_included  UInt64 COMMENT 'The number of chunks included in the block',
-    prev_block_hash  String COMMENT 'The previous block hash',
-    author_id        String COMMENT 'The account ID of the block author',
-    signature        String COMMENT 'The block signature',
-    protocol_version UInt32 COMMENT 'The protocol version',
+    block_height     bigint not null primary key,
+    block_hash       text null,
+    block_timestamp  bigint null,
+    prev_block_height bigint null,
+    epoch_id         text null,
+    chunks_included  bigint null,
+    prev_block_hash  text null,
+    author_id        text null,
+    signature        text null,
+    protocol_version integer null
+);
 
-    INDEX            block_timestamp_minmax_idx block_timestamp TYPE minmax GRANULARITY 1,
-    INDEX            author_id_bloom_index author_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX            epoch_id_bloom_index epoch_id TYPE bloom_filter() GRANULARITY 1,
-    INDEX            block_hash_bloom_index block_hash TYPE bloom_filter() GRANULARITY 1,
-    INDEX            protocol_version_minmax_idx protocol_version TYPE minmax GRANULARITY 1,
-) ENGINE = ReplacingMergeTree
-PRIMARY KEY (block_height)
-ORDER BY (block_height)
+create index blocks_author_id_idx on blocks (author_id);
+create index blocks_epoch_id_idx on blocks (epoch_id);
+create index blocks_block_hash_idx on blocks (block_hash);
+create index blocks_protocol_version_idx on blocks (protocol_version);
 
 CREATE TABLE if not exists public.watch_list
 (

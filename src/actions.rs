@@ -178,7 +178,7 @@ impl ActionsData {
 
     pub async fn maybe_commit(
         &mut self,
-        db: &PostgresDB,
+        db: Arc<Mutex<PostgresDB>>,
         block_height: BlockHeight,
     ) -> anyhow::Result<()> {
         let is_round_block = block_height % SAVE_STEP == 0;
@@ -192,29 +192,44 @@ impl ActionsData {
                 self.rows.data.len()
             );
         }
-        if self.rows.actions.len() >= db.min_batch || is_round_block || self.commit_every_block {
+        let db_clone = Arc::clone(&db);
+        if self.rows.actions.len() >= db_clone.lock().await.min_batch ||
+          is_round_block ||
+          self.commit_every_block
+        {
             self.commit(db).await?;
         }
 
         Ok(())
     }
 
-    pub async fn commit(&mut self, db: &PostgresDB) -> anyhow::Result<()> {
+    pub async fn commit(&mut self, db: Arc<Mutex<PostgresDB>>) -> anyhow::Result<()> {
         let mut rows = Rows::default();
         std::mem::swap(&mut rows, &mut self.rows);
+
         while self.commit_handlers.len() >= MAX_COMMIT_HANDLERS {
             self.commit_handlers.remove(0).await??;
         }
-        let db = db.clone();
+
         let handler = tokio::spawn(async move {
+            let db = db.lock().await;
             if !rows.actions.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.actions, "actions").await?;
+                db.insert_rows_with_retry(
+                    &rows.actions.clone().into_iter().map(|r| r.into()).collect(),
+                    "actions"
+                ).await?;
             }
             if !rows.events.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.events, "events").await?;
+                db.insert_rows_with_retry(
+                    &rows.events.clone().into_iter().map(|r| r.into()).collect(),
+                    "events"
+                ).await?;
             }
             if !rows.data.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.data, "data").await?;
+                db.insert_rows_with_retry(
+                    &rows.data.clone().into_iter().map(|r| r.into()).collect(),
+                    "data"
+                ).await?;
             }
             tracing::log::info!(
                 target: POSTGRES_TARGET,
@@ -232,7 +247,7 @@ impl ActionsData {
 
     pub async fn process_block(
         &mut self,
-        db: &PostgresDB,
+        db: Arc<Mutex<PostgresDB>>,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
     ) -> anyhow::Result<()> {

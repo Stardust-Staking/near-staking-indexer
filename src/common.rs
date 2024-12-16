@@ -1,6 +1,6 @@
 use tracing_subscriber::EnvFilter;
 use crate::actions::{FullActionRow, FullDataRow, FullEventRow};
-use crate::transactions::{AccountTxRow, BlockTxRow, ReceiptTxRow, TransactionRow};
+use crate::transactions::{AccountTxRow, BlockRow, BlockTxRow, ReceiptTxRow, TransactionRow};
 
 pub fn setup_tracing(default: &str) {
     let mut env_filter = EnvFilter::new(default);
@@ -30,6 +30,7 @@ pub enum Row {
     AccountTxRow(AccountTxRow),
     BlockTxRow(BlockTxRow),
     ReceiptTxRow(ReceiptTxRow),
+    BlockRow(BlockRow),
     FullActionRow(FullActionRow),
     FullEventRow(FullEventRow),
     FullDataRow(FullDataRow),

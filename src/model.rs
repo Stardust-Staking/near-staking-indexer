@@ -3,10 +3,11 @@ use std::env;
 use fastnear_primitives::near_primitives::types::BlockHeight;
 use std::time::Duration;
 use crate::common::Row;
-use crate::transactions::{AccountTxRow, BlockTxRow, ReceiptTxRow, TransactionRow};
+use crate::transactions::{AccountTxRow, BlockTxRow, ReceiptTxRow, TransactionRow, BlockRow};
 
 pub const POSTGRES_TARGET: &str = "postgres";
 pub const SAVE_STEP: u64 = 1000;
+pub const MAX_COMMIT_HANDLERS: usize = 3;
 
 pub struct PostgresDB {
   pub client: Client,
@@ -88,7 +89,7 @@ impl PostgresDB {
     Ok(())
   }
 
-  async fn insert_block(&self, row: &BlockTxRow) -> Result<(), Error> {
+  async fn insert_block_tx(&self, row: &BlockTxRow) -> Result<(), Error> {
     self.client.execute(
       "insert into block_txs (\
       block_height, block_hash, block_timestamp, transaction_hash, signer_id, tx_block_height\
@@ -121,6 +122,31 @@ impl PostgresDB {
     Ok(())
   }
 
+  async fn insert_block(&self, row: &BlockRow) -> Result<(), Error> {
+    self.client.execute(
+      "insert into block (\
+      block_height, block_hash, block_timestamp, prev_block_height, epoch_id, chunks_included, \
+      prev_block_hash, author_id, signature, protocol_version\
+    ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+      &[
+        &(row.block_height as i64),
+        &row.block_hash,
+        &(row.block_timestamp as i64),
+        &(match row.prev_block_height {
+          Some(value) => Some(value as i64),
+          _ => None
+        }),
+        &row.epoch_id,
+        &(row.chunks_included as i64),
+        &row.prev_block_hash,
+        &row.author_id,
+        &row.signature,
+        &(row.protocol_version as i32),
+      ]
+    ).await?;
+    Ok(())
+  }
+
   pub async fn insert_rows_with_retry(
     &self,
     rows: &Vec<Row>,
@@ -138,8 +164,9 @@ impl PostgresDB {
             match row {
               Row::TransactionRow(row) => self.insert_transaction(row).await?,
               Row::AccountTxRow(row) => self.insert_account(row).await?,
-              Row::BlockTxRow(row) => self.insert_block(row).await?,
+              Row::BlockTxRow(row) => self.insert_block_tx(row).await?,
               Row::ReceiptTxRow(row) => self.insert_receipt(row).await?,
+              Row::BlockRow(row) => self.insert_block(row).await?,
               _ => ()
             }
           }

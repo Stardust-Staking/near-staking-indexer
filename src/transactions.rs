@@ -131,7 +131,7 @@ impl From<ReceiptTxRow> for Row {
 
 /// Simplified block view in case there a block with no associated transactions.
 /// Also includes some extra metadata.
-#[derive(Row, Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BlockRow {
     pub block_height: u64,
     pub block_hash: String,
@@ -143,6 +143,12 @@ pub struct BlockRow {
     pub author_id: String,
     pub signature: String,
     pub protocol_version: u32,
+}
+
+impl From<BlockRow> for Row {
+    fn from(value: BlockRow) -> Self {
+        Row::BlockRow(value)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -424,7 +430,7 @@ impl TransactionsData {
             .clone()
             .to_string();
 
-        for block_info in transaction.blocks {
+        for block_info in &transaction.blocks {
             self.rows.block_txs.push(BlockTxRow {
                 block_height: block_info.block_height,
                 block_hash: block_info.block_hash.to_string(),
@@ -544,7 +550,10 @@ impl TransactionsData {
                 ).await?;
             }
             if !rows.blocks.is_empty() {
-                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
+                db.insert_rows_with_retry(
+                    &rows.blocks.clone().into_iter().map(|r| r.into()).collect(),
+                    "blocks"
+                ).await?;
             }
             tracing::log::info!(
                 target: POSTGRES_TARGET,
@@ -567,7 +576,7 @@ impl TransactionsData {
         Ok(())
     }
 
-    pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
+    pub async fn last_block_height(&mut self, db: &PostgresDB) -> BlockHeight {
         db.max("block_height", "blocks").await.unwrap_or(0)
     }
 
