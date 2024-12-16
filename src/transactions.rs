@@ -1,37 +1,23 @@
 use crate::*;
 use tokio_postgres::Error;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::env;
-use std::io::Write;
 use std::str::FromStr;
-use fastnear_primitives::near_indexer_primitives::{
-    IndexerExecutionOutcomeWithReceipt, IndexerTransactionWithOutcome,
-};
-use fastnear_primitives::near_primitives::borsh::BorshDeserialize;
+use fastnear_primitives::near_indexer_primitives::IndexerTransactionWithOutcome;
 use fastnear_primitives::near_primitives::hash::CryptoHash;
 use fastnear_primitives::near_primitives::types::{AccountId, BlockHeight};
+use fastnear_primitives::near_primitives::views;
 use fastnear_primitives::near_primitives::views::{
     ActionView, ReceiptEnumView, SignedTransactionView,
 };
-use fastnear_primitives::near_primitives::{borsh, views};
 
 use regex::Regex;
-use serde::de::DeserializeOwned;
+use crate::types::{BlockInfo, ImprovedExecutionOutcome, ImprovedExecutionOutcomeWithReceipt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::common::Row;
 
-const LAST_BLOCK_HEIGHT_KEY: &str = "last_block_height";
-
-const BLOCK_HEADERS_KEY: &str = "block_headers";
-const RECEIPT_TO_TX_KEY: &str = "receipt_to_tx";
-const DATA_RECEIPTS_KEY: &str = "data_receipts";
-const TRANSACTIONS_KEY: &str = "transactions";
-
 const EVENT_JSON_PREFIX: &str = "EVENT_JSON:";
-
-const BLOCK_HEADER_CLEANUP: u64 = 2000;
-const MAX_COMMIT_HANDLERS: usize = 3;
 
 const POTENTIAL_ACCOUNT_ARGS: [&str; 21] = [
     "receiver_id",
@@ -70,6 +56,7 @@ const POTENTIAL_EVENTS_ARGS: [&str; 10] = [
     "nft_contract_id",
 ];
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 #[allow(dead_code)]
 pub struct EventJson {
@@ -142,17 +129,28 @@ impl From<ReceiptTxRow> for Row {
     }
 }
 
+/// Simplified block view in case there a block with no associated transactions.
+/// Also includes some extra metadata.
+#[derive(Row, Serialize, Deserialize, Clone, Debug)]
+pub struct BlockRow {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub block_timestamp: u64,
+    pub prev_block_height: Option<u64>,
+    pub epoch_id: String,
+    pub chunks_included: u64,
+    pub prev_block_hash: String,
+    pub author_id: String,
+    pub signature: String,
+    pub protocol_version: u32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TransactionView {
     pub transaction: SignedTransactionView,
-    pub execution_outcome: views::ExecutionOutcomeWithIdView,
-    pub receipts: Vec<IndexerExecutionOutcomeWithReceipt>,
+    pub execution_outcome: ImprovedExecutionOutcome,
+    pub receipts: Vec<ImprovedExecutionOutcomeWithReceipt>,
     pub data_receipts: Vec<views::ReceiptView>,
-}
-
-fn trim_execution_outcome(execution_outcome: &mut views::ExecutionOutcomeWithIdView) {
-    execution_outcome.proof.clear();
-    execution_outcome.outcome.metadata.gas_profile = None;
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -160,7 +158,7 @@ pub struct PendingTransaction {
     pub tx_block_height: BlockHeight,
     pub tx_block_hash: CryptoHash,
     pub tx_block_timestamp: u64,
-    pub blocks: Vec<BlockHeight>,
+    pub blocks: Vec<BlockInfo>,
     pub transaction: TransactionView,
     pub pending_receipt_ids: Vec<CryptoHash>,
 }
@@ -171,6 +169,7 @@ pub struct TxRows {
     pub account_txs: Vec<AccountTxRow>,
     pub block_txs: Vec<BlockTxRow>,
     pub receipt_txs: Vec<ReceiptTxRow>,
+    pub blocks: Vec<BlockRow>,
 }
 
 impl PendingTransaction {
@@ -207,15 +206,7 @@ impl TransactionsData {
         let commit_every_block = env::var("COMMIT_EVERY_BLOCK")
             .map(|v| v == "true")
             .unwrap_or(false);
-        let sled_db_path = env::var("SLED_DB_PATH").expect("Missing SLED_DB_PATH env var");
-        if std::path::Path::new(&sled_db_path).exists() {
-            std::fs::remove_dir_all(&sled_db_path)
-              .expect(format!("Failed to remove {}", sled_db_path).as_str());
-        }
-        std::fs::create_dir_all(&sled_db_path)
-          .expect(format!("Failed to create {}", sled_db_path).as_str());
-        let sled_db = sled::open(&sled_db_path).expect("Failed to open sled_db_path");
-        let tx_cache = TxCache::new(sled_db);
+        let tx_cache = TxCache::new();
 
         Self {
             commit_every_block,
@@ -231,14 +222,37 @@ impl TransactionsData {
         db: Arc<Mutex<PostgresDB>>,
         block: BlockWithTxHashes,
         last_db_block_height: BlockHeight,
-    ) -> anyhow::Result<()> {
+        prev_block_hash: Option<CryptoHash>,
+    ) -> anyhow::Result<CryptoHash> {
         let block_height = block.block.header.height;
         let block_hash = block.block.header.hash;
         let block_timestamp = block.block.header.timestamp;
+        if let Some(prev_block_hash) = prev_block_hash {
+            assert_eq!(
+                prev_block_hash, block.block.header.prev_hash,
+                "Invalid prev_block_hash for block height {}",
+                block_height
+            );
+        }
+        let block_info = BlockInfo {
+            block_height,
+            block_hash: block_hash.clone(),
+            block_timestamp,
+        };
+        let block_row = BlockRow {
+            block_height,
+            block_hash: block_hash.to_string(),
+            block_timestamp,
+            prev_block_height: block.block.header.prev_height,
+            epoch_id: block.block.header.epoch_id.to_string(),
+            chunks_included: block.block.header.chunks_included,
+            prev_block_hash: block.block.header.prev_hash.to_string(),
+            author_id: block.block.author.to_string(),
+            signature: block.block.header.signature.to_string(),
+            protocol_version: block.block.header.latest_protocol_version,
+        };
 
         let skip_missing_receipts = block_height <= last_db_block_height;
-
-        self.tx_cache.insert_block_header(block.block.header);
 
         let mut complete_transactions = vec![];
 
@@ -247,19 +261,22 @@ impl TransactionsData {
             if let Some(chunk) = shard.chunk.take() {
                 for IndexerTransactionWithOutcome {
                     transaction,
-                    mut outcome,
+                    outcome,
                 } in chunk.transactions
                 {
                     let pending_receipt_ids = outcome.execution_outcome.outcome.receipt_ids.clone();
-                    trim_execution_outcome(&mut outcome.execution_outcome);
                     let pending_transaction = PendingTransaction {
                         tx_block_height: block_height,
                         tx_block_hash: block_hash,
                         tx_block_timestamp: block_timestamp,
-                        blocks: vec![block_height],
+                        blocks: vec![block_info.clone()],
                         transaction: TransactionView {
                             transaction,
-                            execution_outcome: outcome.execution_outcome,
+                            execution_outcome: ImprovedExecutionOutcome::from_outcome(
+                                outcome.execution_outcome,
+                                block_timestamp,
+                                block_height,
+                            ),
                             receipts: vec![],
                             data_receipts: vec![],
                         },
@@ -285,8 +302,7 @@ impl TransactionsData {
         for shard in shards {
             for outcome in shard.receipt_execution_outcomes {
                 let receipt = outcome.receipt;
-                let mut execution_outcome = outcome.execution_outcome;
-                trim_execution_outcome(&mut execution_outcome);
+                let execution_outcome = outcome.execution_outcome;
                 let receipt_id = receipt.receipt_id;
                 let tx_hash = match self.tx_cache.get_and_remove_receipt_to_tx(&receipt_id) {
                     Some(tx_hash) => tx_hash,
@@ -295,7 +311,10 @@ impl TransactionsData {
                             tracing::log::warn!(target: PROJECT_ID, "Missing tx_hash for action receipt_id: {}", receipt_id);
                             continue;
                         }
-                        panic!("Missing tx_hash for receipt_id");
+                        panic!(
+                            "Missing tx_hash for receipt_id {} at block {}",
+                            receipt_id, block_height
+                        );
                     }
                 };
                 let mut pending_transaction = self
@@ -305,8 +324,15 @@ impl TransactionsData {
                 pending_transaction
                     .pending_receipt_ids
                     .retain(|r| r != &receipt_id);
-                if pending_transaction.blocks.last() != Some(&block_height) {
-                    pending_transaction.blocks.push(block_height);
+                if pending_transaction
+                    .blocks
+                    .last()
+                    .as_ref()
+                    .unwrap()
+                    .block_height
+                    != block_height
+                {
+                    pending_transaction.blocks.push(block_info.clone());
                 }
 
                 // Extracting matching data receipts
@@ -347,13 +373,16 @@ impl TransactionsData {
                 };
 
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
-                pending_transaction
-                    .transaction
-                    .receipts
-                    .push(IndexerExecutionOutcomeWithReceipt {
-                        execution_outcome,
+                pending_transaction.transaction.receipts.push(
+                    ImprovedExecutionOutcomeWithReceipt {
+                        execution_outcome: ImprovedExecutionOutcome::from_outcome(
+                            execution_outcome,
+                            block_timestamp,
+                            block_height,
+                        ),
                         receipt,
-                    });
+                    },
+                );
                 pending_transaction
                     .pending_receipt_ids
                     .extend(pending_receipt_ids.clone());
@@ -369,14 +398,12 @@ impl TransactionsData {
             }
         }
 
-        self.tx_cache.trim_headers();
-
-        self.tx_cache.set_u64(LAST_BLOCK_HEIGHT_KEY, block_height);
-        // self.tx_cache.flush();
+        self.tx_cache.last_block_height = block_height;
 
         tracing::log::info!(target: PROJECT_ID, "#{}: Complete {} transactions. Pending {}", block_height, complete_transactions.len(), self.tx_cache.stats());
 
         if block_height > last_db_block_height {
+            self.rows.blocks.push(block_row);
             for transaction in complete_transactions {
                 self.process_transaction(transaction).await?;
             }
@@ -384,12 +411,12 @@ impl TransactionsData {
 
         self.maybe_commit(db, block_height).await?;
 
-        Ok(())
+        Ok(block_hash)
     }
 
     async fn process_transaction(&mut self, transaction: PendingTransaction) -> anyhow::Result<()> {
         let tx_hash = transaction.transaction_hash().to_string();
-        let last_block_height = *transaction.blocks.last().unwrap();
+        let last_block_info = transaction.blocks.last().cloned().unwrap();
         let signer_id = transaction
             .transaction
             .transaction
@@ -397,33 +424,15 @@ impl TransactionsData {
             .clone()
             .to_string();
 
-        for block_height in transaction.blocks.clone() {
-            let block_header = self.tx_cache.get_and_remove_block_header(block_height);
-            if let Some(block_header) = block_header {
-                self.rows.block_txs.push(BlockTxRow {
-                    block_height,
-                    block_hash: block_header.hash.to_string(),
-                    block_timestamp: block_header.timestamp,
-                    transaction_hash: tx_hash.clone(),
-                    signer_id: signer_id.clone(),
-                    tx_block_height: transaction.tx_block_height,
-                });
-                self.tx_cache.insert_block_header(block_header);
-            } else {
-                tracing::log::warn!(target: PROJECT_ID, "Missing block header #{} for a transaction {}", block_height, tx_hash.clone());
-                // Append to a file a record about a missing
-                let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open("missing_block_headers.txt")
-                    .expect("Failed to open missing_block_headers.txt");
-                writeln!(
-                    file,
-                    "{} {} {} {}",
-                    block_height, tx_hash, signer_id, transaction.tx_block_height
-                )
-                .expect("Failed to write to missing_block_headers.txt");
-            }
+        for block_info in transaction.blocks {
+            self.rows.block_txs.push(BlockTxRow {
+                block_height: block_info.block_height,
+                block_hash: block_info.block_hash.to_string(),
+                block_timestamp: block_info.block_timestamp,
+                transaction_hash: tx_hash.clone(),
+                signer_id: signer_id.clone(),
+                tx_block_height: transaction.tx_block_height,
+            });
         }
 
         for receipt in &transaction.transaction.receipts {
@@ -465,7 +474,7 @@ impl TransactionsData {
             tx_block_hash: transaction.tx_block_hash.to_string(),
             tx_block_timestamp: transaction.tx_block_timestamp,
             transaction: serde_json::to_value(&transaction.transaction).unwrap(),
-            last_block_height,
+            last_block_height: last_block_info.block_height,
         });
 
         // TODO: Save TX to redis
@@ -482,12 +491,13 @@ impl TransactionsData {
         if is_round_block {
             tracing::log::info!(
                 target: POSTGRES_TARGET,
-                "#{}: Having {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
+                "#{}: Having {} transactions, {} account_txs, {} block_txs, {} receipts_txs, {} blocks",
                 block_height,
                 self.rows.transactions.len(),
                 self.rows.account_txs.len(),
                 self.rows.block_txs.len(),
                 self.rows.receipt_txs.len(),
+                self.rows.blocks.len(),
             );
         }
         let db_clone = Arc::clone(&db);
@@ -533,13 +543,17 @@ impl TransactionsData {
                     "receipt_txs"
                 ).await?;
             }
+            if !rows.blocks.is_empty() {
+                insert_rows_with_retry(&db.client, &rows.blocks, "blocks").await?;
+            }
             tracing::log::info!(
                 target: POSTGRES_TARGET,
-                "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs",
+                "Committed {} transactions, {} account_txs, {} block_txs, {} receipts_txs, {} blocks",
                 rows.transactions.len(),
                 rows.account_txs.len(),
                 rows.block_txs.len(),
                 rows.receipt_txs.len(),
+                rows.blocks.len(),
             );
             rows.transactions.clear();
             rows.account_txs.clear();
@@ -553,19 +567,15 @@ impl TransactionsData {
         Ok(())
     }
 
-    pub async fn last_block_height(&mut self, db: &PostgresDB) -> BlockHeight {
-        let db_block = db.max("block_height", "block_txs").await.unwrap_or(0);
-        let cache_block = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
-        db_block.max(cache_block)
+    pub async fn last_block_height(&mut self, db: &ClickDB) -> BlockHeight {
+        db.max("block_height", "blocks").await.unwrap_or(0)
     }
 
-    pub fn is_cache_ready(&self, last_block_height: BlockHeight) -> bool {
-        let cache_block = self.tx_cache.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
-        cache_block == last_block_height
+    pub fn is_cache_ready(&self, _last_block_height: BlockHeight) -> bool {
+        false
     }
 
     pub async fn flush(&mut self) -> anyhow::Result<()> {
-        self.tx_cache.flush();
         while let Some(handler) = self.commit_handlers.pop() {
             handler.await??;
         }
@@ -655,10 +665,8 @@ fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views:
     }
 }
 
+#[derive(Default)]
 pub struct TxCache {
-    pub sled_db: sled::Db,
-
-    pub block_headers: BTreeMap<BlockHeight, views::BlockHeaderView>,
     pub receipt_to_tx: HashMap<CryptoHash, CryptoHash>,
     pub data_receipts: HashMap<CryptoHash, views::ReceiptView>,
     pub transactions: HashMap<CryptoHash, PendingTransaction>,
@@ -666,91 +674,17 @@ pub struct TxCache {
 }
 
 impl TxCache {
-    pub fn new(sled: sled::Db) -> Self {
-        let mut this = Self {
-            sled_db: sled,
-            block_headers: Default::default(),
-            receipt_to_tx: Default::default(),
-            data_receipts: Default::default(),
-            transactions: Default::default(),
-            last_block_height: 0,
-        };
-        this.last_block_height = this.get_u64(LAST_BLOCK_HEIGHT_KEY).unwrap_or(0);
-
-        this.block_headers = this.get_json(BLOCK_HEADERS_KEY).unwrap_or_default();
-        this.receipt_to_tx = this.get_json(RECEIPT_TO_TX_KEY).unwrap_or_default();
-        this.data_receipts = this.get_json(DATA_RECEIPTS_KEY).unwrap_or_default();
-        this.transactions = this.get_json(TRANSACTIONS_KEY).unwrap_or_default();
-
-        this
+    pub fn new() -> Self {
+        Default::default()
     }
 
     pub fn stats(&self) -> String {
         format!(
-            "mem: {} tx, {} r, {} dr, {} h",
+            "mem: {} tx, {} r, {} dr",
             self.transactions.len(),
             self.receipt_to_tx.len(),
             self.data_receipts.len(),
-            self.block_headers.len(),
         )
-    }
-
-    pub fn flush(&self) {
-        self.set_json(BLOCK_HEADERS_KEY, &self.block_headers);
-        self.set_json(RECEIPT_TO_TX_KEY, &self.receipt_to_tx);
-        self.set_json(DATA_RECEIPTS_KEY, &self.data_receipts);
-        self.set_json(TRANSACTIONS_KEY, &self.transactions);
-
-        self.sled_db.flush().expect("Failed to flush");
-    }
-
-    pub fn trim_headers(&mut self) {
-        while self.block_headers.len() > BLOCK_HEADER_CLEANUP as usize {
-            let block_height = self.block_headers.keys().next().unwrap().clone();
-            self.block_headers.remove(&block_height);
-        }
-    }
-
-    fn get_json<T>(&self, key: &str) -> Option<T>
-    where
-        T: DeserializeOwned,
-    {
-        self.sled_db
-            .get(key)
-            .expect("Failed to get")
-            .map(|v| serde_json::from_slice(&v).expect("Failed to deserialize"))
-    }
-
-    fn set_json<T>(&self, key: &str, value: T) -> bool
-    where
-        T: Serialize,
-    {
-        self.sled_db
-            .insert(key, serde_json::to_vec(&value).unwrap())
-            .expect("Failed to set")
-            .is_some()
-    }
-
-    pub fn insert_block_header(&mut self, block_header: views::BlockHeaderView) {
-        // In-memory insert.
-        let block_height = block_header.height;
-        let hash = block_header.hash;
-        let old_header = self.block_headers.insert(block_height, block_header);
-        if let Some(old_header) = old_header {
-            assert_eq!(
-                old_header.hash, hash,
-                "Header mismatch at {}!",
-                old_header.height
-            );
-            tracing::log::warn!(target: PROJECT_ID, "Duplicate header: {}", old_header.height);
-        }
-    }
-
-    pub fn get_and_remove_block_header(
-        &mut self,
-        block_height: BlockHeight,
-    ) -> Option<views::BlockHeaderView> {
-        self.block_headers.remove(&block_height)
     }
 
     pub fn get_and_remove_receipt_to_tx(&mut self, receipt_id: &CryptoHash) -> Option<CryptoHash> {
@@ -776,15 +710,43 @@ impl TxCache {
 
     fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: views::ReceiptView) {
         let receipt_id = receipt.receipt_id;
+        let is_promise_resume = match &receipt.receipt {
+            ReceiptEnumView::Action { .. } => false,
+            ReceiptEnumView::Data {
+                is_promise_resume, ..
+            } => *is_promise_resume,
+        };
         let old_receipt = self.data_receipts.insert(*data_id, receipt);
         // In-memory insert.
         if let Some(old_receipt) = old_receipt {
-            assert_eq!(
-                old_receipt.receipt_id, receipt_id,
-                "Duplicate data_id: {} with different receipt_id!",
-                data_id
-            );
-            tracing::log::warn!(target: PROJECT_ID, "Duplicate data_id: {}", data_id);
+            if old_receipt.receipt_id != receipt_id {
+                let old_is_promise_resume = match &old_receipt.receipt {
+                    ReceiptEnumView::Action { .. } => false,
+                    ReceiptEnumView::Data {
+                        is_promise_resume, ..
+                    } => *is_promise_resume,
+                };
+                assert!(
+                    is_promise_resume && old_is_promise_resume,
+                    "Duplicate data_id: {} with different receipt_ids: new {} and old {} while one of them is not promise_resume {} and {}",
+                    data_id,
+                    receipt_id,
+                    old_receipt.receipt_id,
+                    is_promise_resume,
+                    old_is_promise_resume
+                );
+                tracing::log::warn!(target: PROJECT_ID,
+                    "Duplicate data_id: {} with different receipt_ids: new {} and old {}. Ignoring new {}",
+                    data_id,
+                    receipt_id,
+                    old_receipt.receipt_id,
+                    receipt_id
+                );
+                // Restoring the old receipt. Ignoring the new one.
+                self.data_receipts.insert(*data_id, old_receipt);
+            } else {
+                tracing::log::warn!(target: PROJECT_ID, "Duplicate data_id: {} with the same receipt id {}", data_id, receipt_id);
+            }
         }
     }
 
@@ -807,19 +769,5 @@ impl TxCache {
 
     fn get_and_remove_transaction(&mut self, tx_hash: &CryptoHash) -> Option<PendingTransaction> {
         self.transactions.remove(tx_hash)
-    }
-
-    pub fn get_u64(&self, key: &str) -> Option<u64> {
-        self.sled_db
-            .get(key)
-            .expect("Failed to get")
-            .map(|v| u64::try_from_slice(&v).expect("Failed to deserialize"))
-    }
-
-    pub fn set_u64(&self, key: &str, value: u64) -> bool {
-        self.sled_db
-            .insert(key, borsh::to_vec(&value).unwrap())
-            .expect("Failed to set")
-            .is_some()
     }
 }
