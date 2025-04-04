@@ -234,11 +234,14 @@ impl TransactionsData {
         let block_hash = block.block.header.hash;
         let block_timestamp = block.block.header.timestamp;
         if let Some(prev_block_hash) = prev_block_hash {
-            assert_eq!(
+            /*assert_eq!(
                 prev_block_hash, block.block.header.prev_hash,
                 "Invalid prev_block_hash for block height {}",
                 block_height
-            );
+            );*/
+            if prev_block_hash != block.block.header.prev_hash {
+                tracing::log::warn!(target: PROJECT_ID, "Invalid prev_block_hash for block height {}", block_height);
+            }
         }
         let block_info = BlockInfo {
             block_height,
