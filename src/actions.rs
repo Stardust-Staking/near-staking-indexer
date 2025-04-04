@@ -40,6 +40,7 @@ pub enum ActionKind {
     DeleteAccount = 8,
     Delegate = 9,
     NonrefundableStorageTransfer = 10,
+    OtherActionKinds = 99,
 }
 
 #[derive(Serialize, Clone)]
@@ -383,6 +384,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 receiver_id: account_id,
                 receipt_id,
                 receipt,
+                priority: _priority,
             } = outcome.receipt;
             let tx_hash = outcome.tx_hash.expect("Tx Hash is not set").to_string();
             let predecessor_id = predecessor_id.to_string();
@@ -522,6 +524,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                                 // ActionView::NonrefundableStorageTransfer { .. } => {
                                 //     ActionKind::NonrefundableStorageTransfer
                                 // }
+                                _ => ActionKind::OtherActionKinds,
                             },
                             action_json: serde_json::to_string(&action).unwrap(),
                             input_data_ids: input_data_ids
@@ -654,6 +657,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     receiver_id: account_id,
                     receipt_id,
                     receipt,
+                    priority: _priority,
                 } = receipt_view;
                 match receipt {
                     ReceiptEnumView::Action { .. } => {

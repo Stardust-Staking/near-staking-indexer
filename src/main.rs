@@ -8,6 +8,7 @@ mod types;
 use crate::actions::ActionsData;
 use crate::model::*;
 use crate::transactions::TransactionsData;
+use std::env::VarError;
 use std::sync::Arc;
 
 use dotenv::dotenv;
@@ -48,6 +49,7 @@ async fn main() {
         .expect("NUM_FETCHING_THREADS is not set")
         .parse::<u64>()
         .expect("Invalid NUM_FETCHING_THREADS");
+    let auth_bearer_token = std::env::var("RPC_API_KEY");
 
     let first_block_height = fetcher::fetch_first_block(&client, chain_id)
         .await
@@ -74,13 +76,8 @@ async fn main() {
             let last_block_height = backfill_block_height.unwrap_or(db_last_block_height);
             let start_block_height = first_block_height.max(last_block_height + 1);
             let (sender, receiver) = mpsc::channel(100);
-            let config = fetcher::FetcherConfig {
-                num_threads,
-                start_block_height,
-                chain_id,
-            };
+            let config = fetcher_config(num_threads, start_block_height, chain_id, auth_bearer_token);
             tokio::spawn(fetcher::start_fetcher(
-                Some(client),
                 config,
                 sender,
                 is_running,
@@ -102,13 +99,8 @@ async fn main() {
 
             let start_block_height = first_block_height.max(start_block_height);
             let (sender, receiver) = mpsc::channel(100);
-            let config = fetcher::FetcherConfig {
-                num_threads,
-                start_block_height,
-                chain_id,
-            };
+            let config = fetcher_config(num_threads, start_block_height, chain_id, auth_bearer_token);
             tokio::spawn(fetcher::start_fetcher(
-                Some(client),
                 config,
                 sender,
                 is_running,
@@ -122,6 +114,22 @@ async fn main() {
     };
 
     tracing::log::info!(target: PROJECT_ID, "Gracefully shut down");
+}
+
+pub fn fetcher_config(
+    num_threads: u64,
+    start_block_height: u64,
+    chain_id: ChainId,
+    auth_bearer_token: Result<String, VarError>
+) -> fetcher::FetcherConfig {
+    let mut fetcher_config_builder = fetcher::FetcherConfigBuilder::new()
+        .num_threads(num_threads)
+        .start_block_height(start_block_height)
+        .chain_id(chain_id);
+    if auth_bearer_token.is_ok() {
+        fetcher_config_builder = fetcher_config_builder.auth_bearer_token(auth_bearer_token.unwrap());
+    }
+    fetcher_config_builder.build()
 }
 
 async fn listen_blocks_for_actions(
