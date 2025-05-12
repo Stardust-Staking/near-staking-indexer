@@ -647,6 +647,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                 ReceiptEnumView::Data { .. } => {
                     unreachable!("Data receipts don't have execution outcomes");
                 }
+                _ => {}
             }
         }
         // Extracting data receipts
@@ -683,6 +684,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                             .checked_add(1)
                             .expect("Receipt index overflow");
                     }
+                    _ => {}
                 }
             }
         }

@@ -308,6 +308,7 @@ impl TransactionsData {
                         ReceiptEnumView::Data { data_id, .. } => {
                             self.tx_cache.insert_data_receipt(&data_id, receipt);
                         }
+                        _ => {}
                     }
                 }
             }
@@ -384,6 +385,7 @@ impl TransactionsData {
                     ReceiptEnumView::Data { .. } => {
                         unreachable!("Data receipt should be processed before")
                     }
+                    _ => {}
                 };
 
                 let pending_receipt_ids = execution_outcome.outcome.receipt_ids.clone();
@@ -678,7 +680,7 @@ fn add_accounts_from_receipt(accounts: &mut HashSet<AccountId>, receipt: &views:
                 }
             }
         }
-        ReceiptEnumView::Data { .. } => {}
+        _ => {}
     }
 }
 
@@ -728,20 +730,20 @@ impl TxCache {
     fn insert_data_receipt(&mut self, data_id: &CryptoHash, receipt: views::ReceiptView) {
         let receipt_id = receipt.receipt_id;
         let is_promise_resume = match &receipt.receipt {
-            ReceiptEnumView::Action { .. } => false,
             ReceiptEnumView::Data {
                 is_promise_resume, ..
             } => *is_promise_resume,
+            _ => false,
         };
         let old_receipt = self.data_receipts.insert(*data_id, receipt);
         // In-memory insert.
         if let Some(old_receipt) = old_receipt {
             if old_receipt.receipt_id != receipt_id {
                 let old_is_promise_resume = match &old_receipt.receipt {
-                    ReceiptEnumView::Action { .. } => false,
                     ReceiptEnumView::Data {
                         is_promise_resume, ..
                     } => *is_promise_resume,
+                    _ => false,
                 };
                 assert!(
                     is_promise_resume && old_is_promise_resume,
