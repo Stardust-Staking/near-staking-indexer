@@ -24,6 +24,7 @@ const SAFE_CATCH_UP_OFFSET: u64 = 1000;
 
 #[tokio::main]
 async fn main() {
+    #[allow(deprecated)]
     openssl_probe::init_ssl_cert_env_vars();
     dotenv().ok();
 

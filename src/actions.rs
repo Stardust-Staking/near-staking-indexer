@@ -427,6 +427,7 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                     actions,
                     gas_price,
                     is_promise_yield: _is_promise_yield,
+                    refund_to: _refund_to,
                 } => {
                     for (log_index, log) in logs.into_iter().enumerate() {
                         let log_index = u16::try_from(log_index).expect("Log index overflow");
@@ -562,21 +563,21 @@ pub fn extract_rows(msg: BlockWithTxHashes) -> Rows {
                                 _ => None,
                             },
                             deposit: match &action {
-                                ActionView::Transfer { deposit, .. } => Some(*deposit),
-                                ActionView::Stake { stake, .. } => Some(*stake),
-                                ActionView::FunctionCall { deposit, .. } => Some(*deposit),
+                                ActionView::Transfer { deposit, .. } => Some(deposit.as_yoctonear()),
+                                ActionView::Stake { stake, .. } => Some(stake.as_yoctonear()),
+                                ActionView::FunctionCall { deposit, .. } => Some(deposit.as_yoctonear()),
                                 // ActionView::NonrefundableStorageTransfer { deposit } => {
                                 //     Some(*deposit)
                                 // }
                                 _ => None,
                             },
-                            gas_price,
+                            gas_price: gas_price.as_yoctonear(),
                             attached_gas: match &action {
-                                ActionView::FunctionCall { gas, .. } => Some(*gas),
+                                ActionView::FunctionCall { gas, .. } => Some(gas.as_gas()),
                                 _ => None,
                             },
-                            gas_burnt,
-                            tokens_burnt,
+                            gas_burnt: gas_burnt.as_gas(),
+                            tokens_burnt: tokens_burnt.as_yoctonear(),
                             method_name: match &action {
                                 ActionView::FunctionCall { method_name, .. } => {
                                     Some(method_name.to_string())
