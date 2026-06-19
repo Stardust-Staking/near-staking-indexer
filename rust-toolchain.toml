@@ -1,3 +1,2 @@
 [toolchain]
-channel = "1.86.0"
-components = ["rustfmt"]
+channel = "1.88.0"
